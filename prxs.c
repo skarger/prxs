@@ -12,9 +12,12 @@
 #include    <time.h>
 #include    "socklib.h"
 #include    "flexstr.h"
-
+#include	"util.h"
 #include    "prxs.h"
 
+// RFC 2616
+// Request-Line   = Method SP Request-URI SP HTTP-Version CRLF
+#define	is_request_delim(x) ((x)==' ')
 
 /*
  * prxs.c - proxy server
@@ -111,11 +114,17 @@ void handle_call(int fd)
 int read_request(FILE *fp, char rq[], int rqlen)
 {
     /* null means EOF or error. Either way there is no request */
-//    if ( readline(rq, rqlen, fp) == NULL )
-//        return -1;
-//    read_til_crnl(fp);
-    void read_til_crnl2(FILE *fp, int len, char rq[]);
-    read_til_crnl2(fp, MAX_RQ_LEN, rq);
+    if ( readline(rq, rqlen, fp) == NULL )
+        return -1;
+    FLEXLIST *request_line = splitline(newstr(rq, rqlen));
+    printf("nused: %d\n", fl_getcount(request_line));
+    if (fl_getcount(request_line) != 3) {
+        fatal("malformed request", rq, 1);
+    }
+    // process request line
+    read_til_crnl(fp);
+//    void read_til_crnl2(FILE *fp, int len, char rq[]);
+//    read_til_crnl2(fp, MAX_RQ_LEN, rq);
     return 0;
 }
 
@@ -162,6 +171,54 @@ char *readline(char *buf, int len, FILE *fp)
         *cp = '\0';
         return ( c == EOF && cp == buf ? NULL : buf );
 }
+
+
+/**
+ **	splitline ( parse a line into an array of strings )
+ **/
+
+FLEXLIST *splitline(char *line)
+/*
+ * purpose: split a line into list of space separated tokens
+ * returns: a flexlist with copies of the tokens
+ *          or NULL if line is NULL.
+ *          (If no tokens on the line, then the array returned by splitline
+ *           contains only the terminating NULL.)
+ *  action: traverse the array, locate strings, make copies
+ *    note: strtok() could work, but we may want to add quotes later
+ */
+{
+	if ( line == NULL )
+		return NULL;
+
+	char *token;
+    char *search = " "; 
+	FLEXLIST *strings = emalloc(sizeof(FLEXLIST));
+    
+	fl_init(strings,0);
+
+    token = strtok(line, search);
+    while (token != NULL) {
+    	fl_append(strings, newstr(token, strlen(token)));
+        token = strtok(NULL, search);
+    }
+
+	return strings;
+}
+
+/*
+ * purpose: constructor for strings
+ * returns: a string, never NULL
+ */
+char *newstr(char *s, int l)
+{
+	char *rv = emalloc(l+1);
+
+	rv[l] = '\0';
+	strncpy(rv, s, l);
+	return rv;
+}
+
 /*
  * initialization function
  *  1. process command line args
@@ -189,7 +246,7 @@ int startup(int ac, char *av[],char host[], int *portnump)
             if ( ++pos < ac )
                 configfile = av[pos];
             else
-                fatal("missing arg for -c",NULL);
+                fatal("missing arg for -c", NULL, 1);
         }
     }
     process_config_file(configfile, &portnum, &backlog);
@@ -220,7 +277,7 @@ void process_config_file(char *conf_file, int *portnump, int *backlogp)
 
     /* open the file */
     if ( (fp = fopen(conf_file,"r")) == NULL )
-        fatal("Cannot open config file %s", conf_file);
+        fatal("Cannot open config file %s", conf_file, 1);
 
     /* extract the settings */
     while( read_param(fp, param, PARAM_LEN, value, VALUE_LEN) != EOF )
@@ -545,8 +602,4 @@ full_hostname()
     return fullname;
 }
 
-void fatal(char *fmt, char *str)
-{
-    fprintf(stderr, fmt, str);
-    exit(1);
-}
+

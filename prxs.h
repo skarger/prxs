@@ -58,10 +58,13 @@ void	header( FILE *fp, int code, char *msg, char *content_type );
 int	isadir(char *f);
 char	*modify_argument(char *arg, int len);
 int	not_exist(char *f);
-void	fatal(char *, char *);
+
 void	handle_call(int);
 int	read_request(FILE *, char *, int);
 char	*readline(char *, int, FILE *);
+
+char *newstr(char *s, int l);
+FLEXLIST *splitline(char *line);
 
 /* added for assignment */
 char * rfc822_time(time_t thetime);
