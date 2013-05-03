@@ -1,54 +1,41 @@
-#include <stdlib.h>
+#include <pthread.h>
 #include <stdio.h>
-#include <unistd.h>
-
-#include <sys/types.h>
-#include <netdb.h>
-#include <string.h>
-#include <sys/param.h>
-
-
-char *
-full_hostname()
-/*
- * returns full hostname for current machine
- */
+#include <stdlib.h>
+#include <assert.h>
+ 
+#define NUM_THREADS     5
+ 
+void *TaskCode(void *argument)
 {
-    char    hname[MAXHOSTNAMELEN];
-    static  char fullname[MAXHOSTNAMELEN];
-    struct addrinfo hints;
-    struct addrinfo *result;
-    int s;
-
-    if ( gethostname(hname,MAXHOSTNAMELEN) == -1 )    /* get rel name    */
-    {
-        perror("gethostname");
-        exit(1);
-    }
-
-    /* get info about host    */
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_INET;    /* IPv4 */
-    hints.ai_socktype = SOCK_STREAM; /* sequenced, reliable, connection-based i.e. TCP */
-    hints.ai_flags = AI_PASSIVE | AI_CANONNAME;    /* For wildcard IP address | return hostname*/
-    hints.ai_protocol = 0;          /* Any protocol */
-    hints.ai_canonname = NULL;
-    hints.ai_addr = NULL;
-    hints.ai_next = NULL;
-
-    s = getaddrinfo(hname, NULL, &hints, &result);
-    if (s != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
-        exit(EXIT_FAILURE);
-    }
-
-    strcpy( fullname, result->ai_canonname );
-    return fullname;
+   int tid;
+ 
+   tid = *((int *) argument);
+   printf("Hello World! It's me, thread %d!\n", tid);
+ 
+   /* optionally: insert more useful stuff here */
+ 
+   return NULL;
 }
-
-int main(int ac, char **av) {
-    char    fmt[100] ;
-    int nlen = 7, vlen = 31;
-    sprintf(fmt, "%%%ds%%%ds", nlen, vlen);
-    printf("%s\n", fmt);
+ 
+int main(void)
+{
+   pthread_t threads[NUM_THREADS];
+   int thread_args[NUM_THREADS];
+   int rc, i;
+ 
+   /* create all threads */
+   for (i=0; i<NUM_THREADS; ++i) {
+      thread_args[i] = i;
+      printf("In main: creating thread %d\n", i);
+      rc = pthread_create(&threads[i], NULL, TaskCode, (void *) &thread_args[i]);
+      assert(0 == rc);
+   }
+ 
+   /* wait for all threads to complete */
+   for (i=0; i<NUM_THREADS; ++i) {
+      rc = pthread_join(threads[i], NULL);
+      assert(0 == rc);
+   }
+ 
+   exit(EXIT_SUCCESS);
 }
