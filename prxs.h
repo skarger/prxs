@@ -28,6 +28,16 @@
 #define	PARAM_LEN	128
 #define	VALUE_LEN	512
 
+// indices of substrings within HTTP request line
+#define RL_METHOD 0
+#define RL_REQUEST_URI 1
+#define RL_HTTP_VERSION 2
+
+// indices of substrings within HTTP request URI
+#define RU_PROTOCOL 0
+#define RU_HOST 1
+#define RU_PATH 2
+
 #define	oops(m,x)	{ perror(m); exit(x); }
 
 

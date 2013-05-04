@@ -116,14 +116,24 @@ int read_request(FILE *fp, char rq[], int rqlen)
     /* null means EOF or error. Either way there is no request */
     if ( readline(rq, rqlen, fp) == NULL )
         return -1;
+
+    // split the request line into a list of 3 strings:
+    // the method, the request_uri, and the http version
     FLEXLIST *request_line = splitline(newstr(rq, rqlen));
     printf("nused: %d\n", fl_getcount(request_line));
+
+    FLEXLIST *parse_request_uri(char *);
+    FLEXLIST *parsed_request = parse_request_uri(fl_getlist(request_line)[RL_REQUEST_URI]);
+    printf("protocol:%s\n",fl_getlist(parsed_request)[RU_PROTOCOL]);
+    printf("host:%s\n",fl_getlist(parsed_request)[RU_HOST]);
+    printf("path:%s\n",fl_getlist(parsed_request)[RU_PATH]);
+
     if (fl_getcount(request_line) != 3) {
         fatal("malformed request", rq, 1);
     }
     // process request line
-    read_til_crnl(fp);
-//    void read_til_crnl2(FILE *fp, int len, char rq[]);
+//    read_til_crnl(fp);
+    void read_til_crnl2(FILE *fp, int len, char rq[]);
 //    read_til_crnl2(fp, MAX_RQ_LEN, rq);
     return 0;
 }
@@ -205,6 +215,45 @@ FLEXLIST *splitline(char *line)
 
 	return strings;
 }
+
+FLEXLIST *parse_request_uri(char *ruri) {
+	if ( ruri == NULL )
+		return NULL;
+
+	char *token;
+    char *search = ":";å
+	FLEXLIST *strings = emalloc(sizeof(FLEXLIST));
+	fl_init(strings,0);
+
+    // store the protocol. should be http or https
+    token = strtok(ruri, search);
+    if (token == NULL) {
+        fatal("missing protocol in request", ruri, 1);
+    }
+    fl_append(strings, newstr(token, strlen(token)));
+
+    // strtok already removed the : so now trim the // before the hostname
+    search = "/";
+    token = strtok(NULL, search);
+    if (token == NULL) {
+        fatal("missing slashes after protocol in request", ruri, 1);
+    }
+    // now token should be pointing at the start of the host. record it.
+    fl_append(strings, newstr(token, strlen(token)));
+
+    // finally need to record the path, so split on the next /
+    // we will re-add the / at the beginning whether we find a path or not
+    token = strtok(NULL, search);
+    FLEXSTR *path = emalloc(sizeof(FLEXSTR));;
+    fs_init(path, 0);
+    fs_addch(path, '/');
+    if (token != NULL) {
+        fs_addstr(path, newstr(token, strlen(token)));
+    }
+    fl_append(strings, fs_getstr(path));
+    return strings;
+}
+
 
 /*
  * purpose: constructor for strings
