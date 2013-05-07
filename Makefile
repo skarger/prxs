@@ -3,7 +3,7 @@
 # makefile for webserver
 #
 
-CC = gcc -Wall
+CC = gcc -Wall -g -pthread
 
 prxs: prxs.o prxs.h socklib.o socklib.h table.o flexstr.o flexstr.h util.o util.h
 	$(CC) -o prxs prxs.o socklib.o util.o flexstr.o

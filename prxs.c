@@ -10,6 +10,7 @@
 #include    <sys/param.h>
 #include    <signal.h>
 #include    <time.h>
+#include    <pthread.h>
 #include    "socklib.h"
 #include    "flexstr.h"
 #include	"util.h"
@@ -38,6 +39,9 @@
 
 char myhost[MAXHOSTNAMELEN];
 int myport;
+
+
+
 char *full_hostname();
 
 /* global table of error messages */
@@ -48,6 +52,8 @@ int
 main(int ac, char *av[])
 {
     int sock, fd;
+
+
 
 //    if ( build_errors( &err_list ) != 0 )
 //        oops("could not build error message list\n", 1 );
@@ -62,11 +68,12 @@ main(int ac, char *av[])
     /* main loop here */
     while(1)
     {
-        fd = accept( sock, NULL, NULL );    /* take a call  */
-        if ( fd == -1 )
+        fd = accept( sock, NULL, NULL );
+        if ( fd == -1 ) {
             perror("accept");
-        else
-            handle_call(fd);        /* handle call    */
+        } else {
+            handle_call(fd);
+        }
     }
     return 0;
     /* never end */
@@ -74,95 +81,173 @@ main(int ac, char *av[])
 
 /*
  * handle_call(fd) - serve the request arriving on fd
- * summary: fork, then get request, then process request
- *    rets: child exits with 1 for error, 0 for ok
- *    note: closes fd in parent
  */
 void handle_call(int fd)
 {
-    int    pid = fork();
-    FILE    *fpin, *fpout;
-    char    request[MAX_RQ_LEN];
-
-
-    /* child: buffer socket and talk with client */
-    if ( pid == 0 )
-    {
-        fpin  = fdopen(fd, "r");
-        fpout = fdopen(fd, "w");
-        if ( fpin == NULL || fpout == NULL )
-            exit(1);
-
-        if ( read_request(fpin, request, MAX_RQ_LEN) == -1 )
-            exit(1);
-        printf("got a call: request = %s", request);
-        process_rq(request, fpout);
-        fflush(fpout);        /* send data to client    */
-        exit(0);        /* child is done    */
-                    /* exit closes files    */
+    int rc;
+    static pthread_t threads[NUM_THREADS];    
+    static int thread_args[NUM_THREADS];
+    static int thread_count = 0;
+    thread_args[thread_count] = fd;
+    rc = pthread_create(&threads[thread_count], NULL,
+                        serve_request, (void *) &thread_args[thread_count]);
+    thread_count++;
+    if (rc != 0) {
+        close(fd);
+        fatal("handle_call: pthread_create failed", "", -1);
     }
-    /* error and parent execute this code */
-    if ( pid == -1 )
-        perror("fork");
+
+    /* if we've run out of threads wait for all threads to complete and resume */
+    if (thread_count >= NUM_THREADS) {
+        int i;
+        for (i = 0; i < NUM_THREADS; i++) {
+            rc = pthread_join(threads[i], NULL);
+            if (rc != 0) {
+                fatal("handle_call: pthread_join failed", "", -1);
+            }
+        }
+        thread_count = 0;
+    }
+
+}
+
+void *serve_request(void *argument) {
+
+
+    int fd = *((int *) argument);
+    FILE *fpin, *fpout;
+
+    /*
+     * MAX_MSG_LEN is large, on the order of 1 MB
+     * therefore we must malloc the buffer for it in order to put it on the heap.
+     * conversely if we said char request[MAX_MSG_LEN] it might cause a stack overflow
+     */
+    char *request = emalloc(MAX_MSG_LEN * sizeof(char));
+
+    /* buffer socket and talk with client */
+    fpin  = fdopen(fd, "r");
+    fpout = fdopen(fd, "w");
+    if ( fpin == NULL || fpout == NULL )
+        exit(1);
+
+    FLEXLIST *request_info = prepare_request(fd, request, MAX_MSG_LEN);
+
+    // connect to server
+    // send request
+    free(request);
+    fl_free(request_info);
+
+    // recv response
+    // send to client (fd)
+
+    process_rq(request, fpout);
+    fflush(fpout);        /* send data to client    */
     close(fd);
+
+
+    return NULL;
 }
 
 /*
  * read the http request into rq not to exceed rqlen
- * return -1 for error, 0 for success
+ * also return a FLEXLIST with components that will be used to connect to desired server
  */
-int read_request(FILE *fp, char rq[], int rqlen)
+FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen)
 {
-    /* null means EOF or error. Either way there is no request */
-    if ( readline(rq, rqlen, fp) == NULL )
-        return -1;
+    int num_bytes;
+    char *cp;
+    char peek_buf[LINELEN];
+    char discard_buf[LINELEN];
 
-    // split the request line into a list of 3 strings:
-    // the method, the request_uri, and the http version
-    FLEXLIST *request_line = splitline(newstr(rq, rqlen));
-    printf("nused: %d\n", fl_getcount(request_line));
+    num_bytes = recv(sockfd, peek_buf, LINELEN, MSG_PEEK | MSG_DONTWAIT);
+    int read_til_crnl(char *, int);
+    // (LINELEN) - 1 to leave room for a null byte at the end
+    int start_line_length = read_til_crnl(peek_buf, (LINELEN) - 1);
+    // truncate what we peeked at to the actual end of the first line
+    peek_buf[start_line_length] = '\0';
+    FLEXLIST *request_line = splitline(peek_buf);
 
-    FLEXLIST *parse_request_uri(char *);
+    // discard the original start line
+    num_bytes = recv(sockfd, discard_buf, start_line_length, MSG_DONTWAIT);
+    if ((num_bytes) < 0)
+        perror("recv");
+
+    // parse the start line and put the re-written version on the request
     FLEXLIST *parsed_request = parse_request_uri(fl_getlist(request_line)[RL_REQUEST_URI]);
-    printf("protocol:%s\n",fl_getlist(parsed_request)[RU_PROTOCOL]);
-    printf("host:%s\n",fl_getlist(parsed_request)[RU_HOST]);
-    printf("path:%s\n",fl_getlist(parsed_request)[RU_PATH]);
+    void write_request_line(char *buf, char *method, char *path, char* http_version);
 
-    if (fl_getcount(request_line) != 3) {
-        fatal("malformed request", rq, 1);
-    }
-    // process request line
-//    read_til_crnl(fp);
-    void read_til_crnl2(FILE *fp, int len, char rq[]);
-//    read_til_crnl2(fp, MAX_RQ_LEN, rq);
-    return 0;
+    // temporarily treat request as a string, i.e. give it a terminating null byte
+    // and rely on that to compute length
+    // we cannot assume the final version has a '\0' though
+    write_request_line( rq, fl_getlist(request_line)[RL_METHOD],
+                        fl_getlist(parsed_request)[RU_PATH],
+                        fl_getlist(request_line)[RL_HTTP_VERSION] );
+
+    // set pointer where to start writing the rest of the request
+    // this will overwrite the current terminating null byte
+    int new_length = strlen(rq);
+    cp = rq + new_length;
+
+    // add on the rest of the request
+    num_bytes = recv(sockfd, cp, (MAX_MSG_LEN) - new_length, MSG_DONTWAIT);
+    if ((num_bytes) < 0)
+        perror("recv");
+
+    // finally return a new FLEXLIST with the fully parsed pieces of the start line
+    FLEXLIST *strings = emalloc(sizeof(FLEXLIST));;
+	fl_init(strings,0);
+
+    // copy the strings so we can free the original lists in this function
+    char *m = fl_getlist(request_line)[RL_METHOD];
+    char *v = fl_getlist(request_line)[RL_HTTP_VERSION];
+    char *proto = fl_getlist(parsed_request)[RU_PROTOCOL];
+    char *h = fl_getlist(parsed_request)[RU_HOST];
+    char *port = fl_getlist(parsed_request)[RU_PORT];
+    char *path = fl_getlist(parsed_request)[RU_PATH];
+
+    fl_append(strings, newstr(m, strlen(m)));
+    fl_append(strings, newstr(v, strlen(v)));
+    fl_append(strings, newstr(proto, strlen(proto)));
+    fl_append(strings, newstr(h, strlen(h)));
+    fl_append(strings, newstr(port, strlen(port)));
+    fl_append(strings, newstr(path, strlen(path)));
+
+    fl_free(request_line);
+    fl_free(parsed_request);
+    return strings;    
 }
 
-void read_til_crnl(FILE *fp)
-{
-        char    buf[MAX_RQ_LEN];
-        while( readline(buf,MAX_RQ_LEN,fp) != NULL 
-            && strcmp(buf,"\r\n") != 0 )
-                ;
+
+
+void write_request_line(char *buf, char *method, char *path, char* http_version) {
+    // make sure the request buffer starts with a null byte for strcat
+    *buf = '\0';
+    char *SP = " ";
+    strcat(buf, method);
+    strcat(buf, SP);
+    strcat(buf, path);
+    strcat(buf, SP);
+    strcat(buf, http_version);
 }
 
-void read_til_crnl2(FILE *fp, int len, char rq[])
+int read_til_crnl(char *buf, int len)
 {
-        int     space = len - 3;
-        char    *cp = rq;
-        int     n = getc(fp), c = n, p = c;
-
-        while( ( n = getc(fp) ) != EOF ){
-                if ( space-- > 0 ) {
-                    if ( n == '\n' && c == '\r' && p == '\n' ) {
-                        *cp++ = '\0';
-                        return;
-                    } else {
-                        *cp++ = c;
-                        p = c; c = n;
-                    }                        
-                }
+    // starting from the beginning of buf search for CRLF.
+    // if found return the length of the sub-string including that 2-char sequence.
+    // if not found return -1
+    char cur, prev;
+    char *cp = buf;
+    cur = *cp;
+    int i = 0;
+    while (i < len) {
+        prev = cur;
+        cur = *cp++;
+        i++;        
+        if (prev == '\r' && cur == '\n') {
+            return i;
         }
+    }
+    return -1;
 }
 
 /* like fgets, but truncates at len but reads until \n */
@@ -203,8 +288,7 @@ FLEXLIST *splitline(char *line)
 
 	char *token;
     char *search = " "; 
-	FLEXLIST *strings = emalloc(sizeof(FLEXLIST));
-    
+	FLEXLIST *strings = emalloc(sizeof(FLEXLIST));    
 	fl_init(strings,0);
 
     token = strtok(line, search);
@@ -216,43 +300,97 @@ FLEXLIST *splitline(char *line)
 	return strings;
 }
 
-FLEXLIST *parse_request_uri(char *ruri) {
-	if ( ruri == NULL )
-		return NULL;
+FLEXLIST *parse_request_uri(char *request_uri) {
+	if ( request_uri == NULL ) {
+        fatal("parse_request_uri: null request passed", "", 1);
+    }
 
-	char *token;
-    char *search = ":";å
 	FLEXLIST *strings = emalloc(sizeof(FLEXLIST));
 	fl_init(strings,0);
 
+    fl_append(strings, extract_protocol(request_uri));
+    fl_append(strings, extract_host(request_uri));
+    fl_append(strings, extract_port(request_uri));
+    fl_append(strings, extract_path(request_uri));
+
+    return strings;
+}
+
+char *extract_protocol(char *request_uri) {
+    // copy to avoid destroying the input string
+    char *copy = newstr(request_uri, strlen(request_uri));
+	char *token;
+    char *search = ":";
     // store the protocol. should be http or https
-    token = strtok(ruri, search);
+    token = strtok(copy, search);
     if (token == NULL) {
-        fatal("missing protocol in request", ruri, 1);
+        fatal("parse_request_uri: missing protocol in request", request_uri, 1);
     }
-    fl_append(strings, newstr(token, strlen(token)));
+    char *protocol = newstr(token, strlen(token));
+    return protocol;
+}
 
-    // strtok already removed the : so now trim the // before the hostname
-    search = "/";
+char *extract_host(char *request_uri) {
+    // copy to avoid destroying the input string
+    char *copy = newstr(request_uri, strlen(request_uri));
+	char *token;
+    char *search = ":/";
+    // the host should be preceded by http(s)://
+    token = strtok(copy, search);
     token = strtok(NULL, search);
     if (token == NULL) {
-        fatal("missing slashes after protocol in request", ruri, 1);
+        fatal("parse_request_uri: nothing after protocol in request", request_uri, 1);
     }
-    // now token should be pointing at the start of the host. record it.
-    fl_append(strings, newstr(token, strlen(token)));
 
-    // finally need to record the path, so split on the next /
-    // we will re-add the / at the beginning whether we find a path or not
+    // now pointing at the beginning of the host. remove the path and port (if present)
+    char *host = newstr(token, strlen(token));
     token = strtok(NULL, search);
+    if (token != NULL) {
+        free(host);
+        host = newstr(token, strlen(token));
+    }
+    return host;
+}
+
+char *extract_port(char *request_uri) {
+    // copy to avoid destroying the input string
+    char *copy = newstr(request_uri, strlen(request_uri));
+	char *token;
+    char *search = ":/";
+    // if there is a port it will come after the second colon (the first is in http://)
+    // it will have a / following but that will be removed by strtok
+    token = strtok(copy, search);
+    token = strtok(NULL, search);
+    token = strtok(NULL, search);
+    char *port;
+    if (token != NULL) {
+        port = newstr(token, strlen(token));
+    } else {
+        port = newstr("80", 2);
+    }
+    return port;
+}
+
+char *extract_path(char *request_uri) {
+    // copy to avoid destroying the input string
+    char *copy = newstr(request_uri, strlen(request_uri));
+	char *token;
+    char *search = "/";
+    // if there is a path it will come after the third slash (the first and second are in http://)
+    token = strtok(copy, search);
+    token = strtok(NULL, search);
+    token = strtok(NULL, search);
+
     FLEXSTR *path = emalloc(sizeof(FLEXSTR));;
     fs_init(path, 0);
+    // we will re-add the / at the beginning whether we find a path or not
     fs_addch(path, '/');
     if (token != NULL) {
         fs_addstr(path, newstr(token, strlen(token)));
     }
-    fl_append(strings, fs_getstr(path));
-    return strings;
+    return fs_getstr(path);
 }
+
 
 
 /*
@@ -384,7 +522,8 @@ int read_param(FILE *fp, char *name, int nlen, char* value, int vlen)
 
 void process_rq(char *rq, FILE *fp)
 {
-    char    cmd[MAX_RQ_LEN], arg[MAX_RQ_LEN];
+    char *cmd = emalloc(MAX_MSG_LEN * sizeof(char));
+    char *arg = emalloc(MAX_MSG_LEN * sizeof(char));
     char    *item, *modify_argument();
 
     if ( sscanf(rq, "%s%s", cmd, arg) != 2 ){
@@ -392,7 +531,7 @@ void process_rq(char *rq, FILE *fp)
         return;
     }
 
-    item = modify_argument(arg, MAX_RQ_LEN);
+    item = modify_argument(arg, MAX_MSG_LEN);
     if ( strcmp(cmd,"GET") != 0 )
         cannot_do(fp);
     else if ( not_exist( item ) )
@@ -403,6 +542,9 @@ void process_rq(char *rq, FILE *fp)
         do_exec( item, fp );
     else
         do_cat( item, fp );
+
+    free (cmd);
+    free(arg);
 }
 
 /*
@@ -648,7 +790,21 @@ full_hostname()
     }
 
     strcpy( fullname, result->ai_canonname );
+    freeaddrinfo(result);
     return fullname;
 }
+
+/*
+connect_to_host() {
+    struct addrinfo *result;
+    int s;
+    s = getaddrinfo(hname, NULL, NULL, &result);
+    if (s != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
+        exit(EXIT_FAILURE);
+    }
+}
+*/
+
 
 
