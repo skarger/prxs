@@ -39,6 +39,7 @@
 
 
 // indices of substrings within HTTP request line
+// RFC 2616: Request-Line   = Method SP Request-URI SP HTTP-Version CRLF
 #define RL_METHOD 0
 #define RL_REQUEST_URI 1
 #define RL_HTTP_VERSION 2
@@ -90,20 +91,19 @@ int	not_exist(char *f);
 
 void	handle_call(int);
 void *serve_request(void *argument);
-FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen);
+FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen, int *final_rqlen);
 FLEXLIST *parse_request_uri(char *);
 char *extract_protocol(char *request_uri);
 char *extract_host(char *request_uri);
 char *extract_port(char *request_uri);
 char *extract_path(char *request_uri);
+int connect_to_host(FLEXLIST *request_info);
+int receive_from_server(int sockfd, char *buf);
 char	*readline(char *, int, FILE *);
+char *full_hostname();
 
 char *newstr(char *s, int l);
 FLEXLIST *splitline(char *line);
 
-/* added for assignment */
-char * rfc822_time(time_t thetime);
-int build_errors( FLEXLIST *err_list );
-char *get_err_msg( FLEXLIST *err, char *name );
 
 #endif

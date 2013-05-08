@@ -6,8 +6,11 @@
 #include    <errno.h>
 #include    <unistd.h>
 #include    <sys/types.h>
+#include    <sys/socket.h>
 #include    <sys/stat.h>
 #include    <sys/param.h>
+#include    <sys/select.h>
+#include    <sys/time.h>
 #include    <signal.h>
 #include    <time.h>
 #include    <pthread.h>
@@ -16,36 +19,19 @@
 #include	"util.h"
 #include    "prxs.h"
 
-// RFC 2616
-// Request-Line   = Method SP Request-URI SP HTTP-Version CRLF
-#define	is_request_delim(x) ((x)==' ')
 
 /*
  * prxs.c - proxy server
  * 
  * usage: prxs [ -c configfilenmame ]
  *
- * features: supports the GET command only
- *           runs in the current directory
- *           forks a new child to handle each request
- *
- * compile: cc prxs.c socklib.c -o prxs
- *
  * Adapted from simple web server code provided by Harvard Extension School
+ * Specifically socklib.c, flexstr.c, and code to start server with config file
  * Course: CSCI-E215, Instructor: Bruce Molay
  */
 
-
-
 char myhost[MAXHOSTNAMELEN];
 int myport;
-
-
-
-char *full_hostname();
-
-/* global table of error messages */
-//FLEXLIST err_list; 
 
 
 int
@@ -53,15 +39,9 @@ main(int ac, char *av[])
 {
     int sock, fd;
 
-
-
-//    if ( build_errors( &err_list ) != 0 )
-//        oops("could not build error message list\n", 1 );
-
     /* set up */
     sock = startup(ac, av, myhost, &myport);
 
-    /* sign on */
     printf("%s%s started. host=%s port=%d\n",
         SERVER_NAME, VERSION, myhost, myport);
 
@@ -108,51 +88,104 @@ void handle_call(int fd)
         }
         thread_count = 0;
     }
-
 }
 
 void *serve_request(void *argument) {
-
-
-    int fd = *((int *) argument);
-    FILE *fpin, *fpout;
+    int clientfd = *((int *) argument);
 
     /*
      * MAX_MSG_LEN is large, on the order of 1 MB
      * therefore we must malloc the buffer for it in order to put it on the heap.
-     * conversely if we said char request[MAX_MSG_LEN] it might cause a stack overflow
+     * conversely if we said char buffer[MAX_MSG_LEN] it might cause a stack overflow
      */
-    char *request = emalloc(MAX_MSG_LEN * sizeof(char));
+    char *buffer = emalloc(MAX_MSG_LEN * sizeof(char));
+    int send_rqlen;
 
-    /* buffer socket and talk with client */
-    fpin  = fdopen(fd, "r");
-    fpout = fdopen(fd, "w");
-    if ( fpin == NULL || fpout == NULL )
-        exit(1);
+    // re-write the request into format suitable for destination server
+    // and extract some elements of the request needed to connect
+    FLEXLIST *request_info = prepare_request(clientfd, buffer, MAX_MSG_LEN, &send_rqlen);
 
-    FLEXLIST *request_info = prepare_request(fd, request, MAX_MSG_LEN);
-
-    // connect to server
     // send request
-    free(request);
+    int serverfd = connect_to_host(request_info);
     fl_free(request_info);
+    printf("sfd: %d\n", serverfd);
+    printf("buffer: %s\n", buffer);
+    int num_sent = send(serverfd, buffer, send_rqlen, 0);
+    printf("srl: %d ns: %d\n", send_rqlen, num_sent);
+    if (num_sent < 0) {
+        fatal("serve_request: failure sending to server","",1);
+    }
 
-    // recv response
-    // send to client (fd)
-
-    process_rq(request, fpout);
-    fflush(fpout);        /* send data to client    */
-    close(fd);
+    // reuse the request buffer for the response
+    int num_received = receive_from_server(serverfd, buffer);
+    printf("got data: %s\n", buffer);
 
 
+    // send back to client (clientfd)
+
+
+    free(buffer);
+    close(clientfd);
+    close(serverfd);
+    
     return NULL;
+}
+
+int receive_from_server(int sockfd, char *buf) {
+    /* watch the server socket to see when it has input */
+    fd_set rfds;
+    struct timeval tv;
+    int retval;
+
+    FD_ZERO(&rfds);
+    FD_SET(sockfd, &rfds);
+
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+
+    retval = select(sockfd + 1, &rfds, NULL, NULL, &tv);
+    int num_received;
+    if (retval == -1) {
+        fatal("receive_from_server","select failure", 1);
+    } else if (retval) {
+        num_received = recv(sockfd, buf, MAX_MSG_LEN, MSG_DONTWAIT);
+    } else {
+        /* no data after timeout seconds */
+        fatal("receive_from_server","no data", 1);
+    }
+    return num_received;
+}
+
+int connect_to_host(FLEXLIST *request_info) {
+    struct addrinfo *result, *rp;
+    int serverfd = -1, rc;
+    rc = getaddrinfo(fl_getlist(request_info)[REQ_HOST], fl_getlist(request_info)[REQ_PORT],
+                NULL, &result);
+    if (rc != 0) {
+        fatal("connect_to_host: cannot look up address info",
+                fl_getlist(request_info)[REQ_HOST], 1);
+    }
+
+   for (rp = result; rp != NULL; rp = rp->ai_next) {
+        serverfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (serverfd == -1)
+            continue;
+
+       if (connect(serverfd, rp->ai_addr, rp->ai_addrlen) != -1) {
+            break;                  /* Success */
+        }
+
+        close(serverfd);
+    }
+    freeaddrinfo(result);
+    return serverfd;
 }
 
 /*
  * read the http request into rq not to exceed rqlen
  * also return a FLEXLIST with components that will be used to connect to desired server
  */
-FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen)
+FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen, int *final_rqlen)
 {
     int num_bytes;
     char *cp;
@@ -166,6 +199,9 @@ FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen)
     // truncate what we peeked at to the actual end of the first line
     peek_buf[start_line_length] = '\0';
     FLEXLIST *request_line = splitline(peek_buf);
+    if (request_line == NULL) {
+        fatal("prepare_request", "request_line could be parsed", 1);
+    }
 
     // discard the original start line
     num_bytes = recv(sockfd, discard_buf, start_line_length, MSG_DONTWAIT);
@@ -193,6 +229,9 @@ FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen)
     if ((num_bytes) < 0)
         perror("recv");
 
+    // tell the caller how long the final request is
+    *final_rqlen = new_length + num_bytes;
+
     // finally return a new FLEXLIST with the fully parsed pieces of the start line
     FLEXLIST *strings = emalloc(sizeof(FLEXLIST));;
 	fl_init(strings,0);
@@ -216,7 +255,6 @@ FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen)
     fl_free(parsed_request);
     return strings;    
 }
-
 
 
 void write_request_line(char *buf, char *method, char *path, char* http_version) {
@@ -250,27 +288,7 @@ int read_til_crnl(char *buf, int len)
     return -1;
 }
 
-/* like fgets, but truncates at len but reads until \n */
-char *readline(char *buf, int len, FILE *fp)
-{
-        int     space = len - 2;
-        char    *cp = buf;
-        int     c;
 
-        while( ( c = getc(fp) ) != '\n' && c != EOF ){
-                if ( space-- > 0 )
-                        *cp++ = c;
-        }
-        if ( c == '\n' )
-                *cp++ = c;
-        *cp = '\0';
-        return ( c == EOF && cp == buf ? NULL : buf );
-}
-
-
-/**
- **	splitline ( parse a line into an array of strings )
- **/
 
 FLEXLIST *splitline(char *line)
 /*
@@ -280,7 +298,6 @@ FLEXLIST *splitline(char *line)
  *          (If no tokens on the line, then the array returned by splitline
  *           contains only the terminating NULL.)
  *  action: traverse the array, locate strings, make copies
- *    note: strtok() could work, but we may want to add quotes later
  */
 {
 	if ( line == NULL )
@@ -390,7 +407,6 @@ char *extract_path(char *request_uri) {
     }
     return fs_getstr(path);
 }
-
 
 
 /*
@@ -511,249 +527,6 @@ int read_param(FILE *fp, char *name, int nlen, char* value, int vlen)
     }
     return EOF;
 }
-    
-
-
-/* ------------------------------------------------------ *
-   process_rq( char *rq, FILE *fpout)
-   do what the request asks for and write reply to fp
-   rq is HTTP command:  GET /foo/bar.html HTTP/1.0
-   ------------------------------------------------------ */
-
-void process_rq(char *rq, FILE *fp)
-{
-    char *cmd = emalloc(MAX_MSG_LEN * sizeof(char));
-    char *arg = emalloc(MAX_MSG_LEN * sizeof(char));
-    char    *item, *modify_argument();
-
-    if ( sscanf(rq, "%s%s", cmd, arg) != 2 ){
-        bad_request(fp);
-        return;
-    }
-
-    item = modify_argument(arg, MAX_MSG_LEN);
-    if ( strcmp(cmd,"GET") != 0 )
-        cannot_do(fp);
-    else if ( not_exist( item ) )
-        do_404(item, fp );
-    else if ( isadir( item ) )
-        do_ls( item, fp );
-    else if ( ends_in_cgi( item ) )
-        do_exec( item, fp );
-    else
-        do_cat( item, fp );
-
-    free (cmd);
-    free(arg);
-}
-
-/*
- * modify_argument
- *  purpose: many roles
- *        security - remove all ".." components in paths
- *        cleaning - if arg is "/" convert to "."
- *  returns: pointer to modified string
- *     args: array containing arg and length of that array
- */
-
-char *
-modify_argument(char *arg, int len)
-{
-    char    *nexttoken;
-    char    *copy = malloc(len);
-
-    if ( copy == NULL )
-        oops("memory error", 1);
-
-    /* remove all ".." components from path */
-    /* by tokenizing on "/" and rebuilding */
-    /* the string without the ".." items    */
-
-    *copy = '\0';
-
-    nexttoken = strtok(arg, "/");
-    while( nexttoken != NULL )
-    {
-        if ( strcmp(nexttoken,"..") != 0 )
-        {
-            if ( *copy )
-                strcat(copy, "/");
-            strcat(copy, nexttoken);
-        }
-        nexttoken = strtok(NULL, "/");
-    }
-    strcpy(arg, copy);
-    free(copy);
-
-    /* the array is now cleaned up */
-    /* handle a special case       */
-
-    if ( strcmp(arg,"") == 0 )
-        strcpy(arg, ".");
-    return arg;
-}
-/* ------------------------------------------------------ *
-   the reply header thing: all functions need one
-   if content_type is NULL then don't send content type
-   ------------------------------------------------------ */
-
-void
-header( FILE *fp, int code, char *msg, char *content_type )
-{
-    fprintf(fp, "HTTP/1.0 %d %s\r\n", code, msg);
-    if ( content_type )
-        fprintf(fp, "Content-type: %s\r\n", content_type );
-
-    if ( SEND_SERVER )
-        fprintf(fp,"Server: %s/%s\r\n", SERVER_NAME, VERSION );
-}
-
-/* ------------------------------------------------------ *
-   simple functions first:
-    bad_request(fp)     bad request syntax
-        cannot_do(fp)       unimplemented HTTP command
-    and do_404(item,fp)     no such object
-   ------------------------------------------------------ */
-
-void
-bad_request(FILE *fp)
-{
-    header(fp, 400, "Bad Request", "text/plain");
-    fprintf(fp, "\r\n");
-
-//    fprintf(fp, get_err_msg( &err_list, "bad_request" ) );
-    //fprintf(fp, "I cannot understand your request\r\n");
-}
-
-void
-cannot_do(FILE *fp)
-{
-    header(fp, 501, "Not Implemented", "text/plain");
-    fprintf(fp, "\r\n");
-
-    fprintf(fp, "That command is not yet implemented\r\n");
-}
-
-void
-do_404(char *item, FILE *fp)
-{
-    header(fp, 404, "Not Found", "text/plain");
-    fprintf(fp, "\r\n");
-
-//    fprintf(fp, get_err_msg( &err_list, "do_404" ) );
-/*
-    fprintf(fp, "The item you requested: %s\r\nis not found\r\n", 
-            item);
-*/
-}
-
-/* ------------------------------------------------------ *
-   the directory listing section
-   isadir() uses stat, not_exist() uses stat
-   do_ls runs ls. It should not
-   ------------------------------------------------------ */
-
-int
-isadir(char *f)
-{
-    struct stat info;
-    return ( stat(f, &info) != -1 && S_ISDIR(info.st_mode) );
-}
-
-int
-not_exist(char *f)
-{
-    struct stat info;
-
-    return( stat(f,&info) == -1 && errno == ENOENT );
-}
-
-/*
- * lists the directory named by 'dir' 
- * sends the listing to the stream at fp
- */
-void
-do_ls(char *dir, FILE *fp)
-{
-    int    fd;    /* file descriptor of stream */
-
-    header(fp, 200, "OK", "text/plain");
-    fprintf(fp,"\r\n");
-    fflush(fp);
-
-    fd = fileno(fp);
-    dup2(fd,1);
-    dup2(fd,2);
-    execlp("/bin/ls","ls","-l",dir,NULL);
-    perror(dir);
-}
-
-/* ------------------------------------------------------ *
-   the cgi stuff.  function to check extension and
-   one to run the program.
-   ------------------------------------------------------ */
-
-char *
-file_type(char *f)
-/* returns 'extension' of file */
-{
-    char    *cp;
-    if ( (cp = strrchr(f, '.' )) != NULL )
-        return cp+1;
-    return "";
-}
-
-int
-ends_in_cgi(char *f)
-{
-    return ( strcmp( file_type(f), "cgi" ) == 0 );
-}
-
-void
-do_exec( char *prog, FILE *fp)
-{
-    int    fd = fileno(fp);
-
-    header(fp, 200, "OK", NULL);
-    fflush(fp);
-
-    dup2(fd, 1);
-    dup2(fd, 2);
-    execl(prog,prog,NULL);
-    perror(prog);
-}
-/* ------------------------------------------------------ *
-   do_cat(filename,fp)
-   sends back contents after a header
-   ------------------------------------------------------ */
-
-void
-do_cat(char *f, FILE *fpsock)
-{
-    char    *extension = file_type(f);
-    char    *content = "text/plain";
-    FILE    *fpfile;
-    int    c;
-
-    if ( strcmp(extension,"html") == 0 )
-        content = "text/html";
-    else if ( strcmp(extension, "gif") == 0 )
-        content = "image/gif";
-    else if ( strcmp(extension, "jpg") == 0 )
-        content = "image/jpeg";
-    else if ( strcmp(extension, "jpeg") == 0 )
-        content = "image/jpeg";
-
-    fpfile = fopen( f , "r");
-    if ( fpfile != NULL )
-    {
-        header( fpsock, 200, "OK", content );
-        fprintf(fpsock, "\r\n");
-        while( (c = getc(fpfile) ) != EOF )
-            putc(c, fpsock);
-        fclose(fpfile);
-    }
-}
 
 char *
 full_hostname()
@@ -793,18 +566,3 @@ full_hostname()
     freeaddrinfo(result);
     return fullname;
 }
-
-/*
-connect_to_host() {
-    struct addrinfo *result;
-    int s;
-    s = getaddrinfo(hname, NULL, NULL, &result);
-    if (s != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
-        exit(EXIT_FAILURE);
-    }
-}
-*/
-
-
-

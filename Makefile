@@ -1,17 +1,14 @@
-#
-#
-# makefile for webserver
-#
+# makefile for proxy server
 
 CC = gcc -Wall -g -pthread
 
-prxs: prxs.o prxs.h socklib.o socklib.h table.o flexstr.o flexstr.h util.o util.h
+prxs: prxs.o prxs.h socklib.o socklib.h flexstr.o flexstr.h util.o util.h
 	$(CC) -o prxs prxs.o socklib.o util.o flexstr.o
 
-table.o: table.c
-	$(CC) -c table.c
+socklib.o: socklib.c socklib.h
+	$(CC) -c socklib.c
 
-flexstr.o: flexstr.c util.c
+flexstr.o: flexstr.c flexstr.h util.c
 	$(CC) -c flexstr.c util.c
 
 util.o: util.c util.h
