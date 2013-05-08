@@ -2,10 +2,13 @@
 #include    <strings.h>
 #include    <sys/types.h>
 #include    <sys/socket.h>
+#include    <sys/select.h>
+#include    <sys/time.h>
 #include    <netinet/in.h>
 #include    <netdb.h>
 #include    <unistd.h>
 #include    <string.h>
+#include    "util.h"
 
 /*
  *    socklib.c
@@ -62,33 +65,38 @@ make_server_socket( int portnum, int backlog )
 }
 
 
-int
-connect_to_server( char *hostname, int portnum )
+int connect_to_server( char *hostname, char *portnum )
 {
-    struct sockaddr_in  servadd;        /* the number to call */
-    struct hostent      *hp;            /* used to get number */
-    int    sock_id;                /* returned to caller */
+    struct addrinfo *result, *rp,  hints;
+    int serverfd = -1, rc;
 
-        /*
-         *  build the network address of where we want to call
-         */
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_INET;       /* IPv4 */
+    hints.ai_socktype = SOCK_STREAM; /* sequenced, reliable, connection-based i.e. TCP */
+    hints.ai_flags = AI_CANONNAME;   /* return hostname */
+    hints.ai_protocol = 0;           /* Any protocol */
+    hints.ai_canonname = NULL;
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
 
-       memset( &servadd, 0, sizeof( servadd ) );   /* 0. zero the address   */
-       servadd.sin_family = AF_INET ;              /* 1. fill in addr type  */
+    rc = getaddrinfo(hostname, portnum, &hints, &result);
+    if (rc != 0) {
+        printf("getaddrinfo: %s\n", gai_strerror(rc));
+        fatal("connect_to_server", "", 1);
+    }
 
-       hp = gethostbyname( hostname );           /* 2. and host addr      */
-       if ( hp == NULL ) return -1;
-       memcpy( &servadd.sin_addr, hp->h_addr, hp->h_length);
-       servadd.sin_port = htons(portnum);          /* 3. and port number    */
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        serverfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (serverfd == -1)
+            continue;
 
-       /*
-        *        make the connection
-        */
+       if (connect(serverfd, rp->ai_addr, rp->ai_addrlen) != -1) {
+            break;                  /* Success */
+        }
 
-       sock_id = socket( PF_INET, SOCK_STREAM, 0 );    /* get a line   */
-       if ( sock_id == -1 ) return -1;                 /* or fail      */
-                                                       /* now dial     */
-       if ( connect(sock_id,(struct sockaddr*)&servadd, sizeof(servadd)) !=0 )  
-               return -1;
-       return sock_id;
+        close(serverfd);
+    }
+    freeaddrinfo(result);
+    return serverfd;
 }
+

@@ -105,24 +105,28 @@ void *serve_request(void *argument) {
     // and extract some elements of the request needed to connect
     FLEXLIST *request_info = prepare_request(clientfd, buffer, MAX_MSG_LEN, &send_rqlen);
 
+    if (request_info == NULL || send_rqlen == 0) {
+        close(clientfd);
+        return NULL;   
+    }
+
     // send request
-    int serverfd = connect_to_host(request_info);
+    int serverfd = connect_to_server(fl_getlist(request_info)[REQ_HOST],
+                                     fl_getlist(request_info)[REQ_PORT]);
     fl_free(request_info);
-    printf("sfd: %d\n", serverfd);
-    printf("buffer: %s\n", buffer);
     int num_sent = send(serverfd, buffer, send_rqlen, 0);
-    printf("srl: %d ns: %d\n", send_rqlen, num_sent);
     if (num_sent < 0) {
         fatal("serve_request: failure sending to server","",1);
     }
 
     // reuse the request buffer for the response
     int num_received = receive_from_server(serverfd, buffer);
-    printf("got data: %s\n", buffer);
-
 
     // send back to client (clientfd)
-
+    int num_sent_back = send(clientfd, buffer, num_received, 0);
+    if (num_sent_back < 0) {
+        fatal("serve_request: failure sending back to client","",1);
+    }
 
     free(buffer);
     close(clientfd);
@@ -131,7 +135,7 @@ void *serve_request(void *argument) {
     return NULL;
 }
 
-int receive_from_server(int sockfd, char *buf) {
+int receive_from_server(int sockfd, char *recv_buffer) {
     /* watch the server socket to see when it has input */
     fd_set rfds;
     struct timeval tv;
@@ -148,37 +152,13 @@ int receive_from_server(int sockfd, char *buf) {
     if (retval == -1) {
         fatal("receive_from_server","select failure", 1);
     } else if (retval) {
-        num_received = recv(sockfd, buf, MAX_MSG_LEN, MSG_DONTWAIT);
+        num_received = recv(sockfd, recv_buffer, MAX_MSG_LEN, MSG_DONTWAIT);
     } else {
         /* no data after timeout seconds */
-        fatal("receive_from_server","no data", 1);
+        num_received = 0;
     }
+
     return num_received;
-}
-
-int connect_to_host(FLEXLIST *request_info) {
-    struct addrinfo *result, *rp;
-    int serverfd = -1, rc;
-    rc = getaddrinfo(fl_getlist(request_info)[REQ_HOST], fl_getlist(request_info)[REQ_PORT],
-                NULL, &result);
-    if (rc != 0) {
-        fatal("connect_to_host: cannot look up address info",
-                fl_getlist(request_info)[REQ_HOST], 1);
-    }
-
-   for (rp = result; rp != NULL; rp = rp->ai_next) {
-        serverfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (serverfd == -1)
-            continue;
-
-       if (connect(serverfd, rp->ai_addr, rp->ai_addrlen) != -1) {
-            break;                  /* Success */
-        }
-
-        close(serverfd);
-    }
-    freeaddrinfo(result);
-    return serverfd;
 }
 
 /*
@@ -199,8 +179,9 @@ FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen, int *final_rqlen)
     // truncate what we peeked at to the actual end of the first line
     peek_buf[start_line_length] = '\0';
     FLEXLIST *request_line = splitline(peek_buf);
-    if (request_line == NULL) {
-        fatal("prepare_request", "request_line could be parsed", 1);
+    if (request_line == NULL || fl_getcount(request_line) != 3) {
+        *final_rqlen = 0;
+        return NULL;
     }
 
     // discard the original start line

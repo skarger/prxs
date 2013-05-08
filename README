@@ -1,0 +1,4 @@
+Build: make
+Run: ./prxs
+Notes: works for extremely basic requests. Usually crashes when pages send off additional requests (for CSS etc.).
+
