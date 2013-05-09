@@ -2,23 +2,8 @@
 #ifndef _PRXS_
 #define _PRXS_
 
-#include	<stdio.h>
-#include	<stdlib.h>
-#include	<strings.h>
-#include	<string.h>
-#include	<netdb.h>
-#include	<errno.h>
-#include	<unistd.h>
-#include	<sys/types.h>
-#include	<sys/stat.h>
-#include	<sys/param.h>
-#include	<signal.h>
-#include	<time.h>
-#include	"socklib.h"
-#include	"flexstr.h"
-
-
 #define	CONFIG_FILE	"prxs.conf"
+#define SERVER_NAME	"prxs"
 #define	VERSION		"1"
 #define	PORTNUM	8080
 
@@ -61,35 +46,14 @@
 #define	oops(m,x)	{ perror(m); exit(x); }
 
 
-
-#define SERVER_NAME	"prxs"
-
-/* can change to 0 if do not want to send server in header for security */
-#define SEND_SERVER	1
-
-
 /*
  * prototypes
  */
 
-/* taken from ws.c */
-int	startup(int, char *a[], char [], int *);
-int read_til_crnl(char *, int);
-void	process_rq( char *, FILE *);
-void	bad_request(FILE *);
-void	cannot_do(FILE *fp);
-void	do_404(char *item, FILE *fp);
-void	do_cat(char *f, FILE *fpsock);
-void	do_exec( char *prog, FILE *fp);
-void	do_ls(char *dir, FILE *fp);
-int	ends_in_cgi(char *f);
-char 	*file_type(char *f);
-void	header( FILE *fp, int code, char *msg, char *content_type );
-int	isadir(char *f);
-char	*modify_argument(char *arg, int len);
-int	not_exist(char *f);
 
-void	handle_call(int);
+int	startup(int, char *a[], char [], int *);
+char *full_hostname();
+void handle_call(int);
 void *serve_request(void *argument);
 FLEXLIST *prepare_request(int sockfd, char rq[], int rqlen, int *final_rqlen);
 FLEXLIST *parse_request_uri(char *);
@@ -97,13 +61,13 @@ char *extract_protocol(char *request_uri);
 char *extract_host(char *request_uri);
 char *extract_port(char *request_uri);
 char *extract_path(char *request_uri);
-int connect_to_host(FLEXLIST *request_info);
-int receive_from_server(int sockfd, char *buf);
-char	*readline(char *, int, FILE *);
-char *full_hostname();
+int read_til_crnl(char *, int);
 
 char *newstr(char *s, int l);
 FLEXLIST *splitline(char *line);
 
+int connect_to_host(FLEXLIST *request_info);
+void relay_data(int clientfd, int serverfd, char *buffer);
+int talk(int clientfd, int serverfd, fd_set *rdfsp, char *buffer);
 
 #endif

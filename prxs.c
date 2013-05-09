@@ -4,6 +4,7 @@
 #include    <string.h>
 #include    <netdb.h>
 #include    <errno.h>
+#include    <fcntl.h>
 #include    <unistd.h>
 #include    <sys/types.h>
 #include    <sys/socket.h>
@@ -107,59 +108,105 @@ void *serve_request(void *argument) {
 
     if (request_info == NULL || send_rqlen == 0) {
         close(clientfd);
-        return NULL;   
+        return NULL;
     }
 
     // send request
     int serverfd = connect_to_server(fl_getlist(request_info)[REQ_HOST],
                                      fl_getlist(request_info)[REQ_PORT]);
+    if (serverfd < 0) {
+        close(clientfd);
+        return NULL;
+    }
     fl_free(request_info);
     int num_sent = send(serverfd, buffer, send_rqlen, 0);
     if (num_sent < 0) {
         fatal("serve_request: failure sending to server","",1);
     }
 
-    // reuse the request buffer for the response
-    int num_received = receive_from_server(serverfd, buffer);
-
-    // send back to client (clientfd)
-    int num_sent_back = send(clientfd, buffer, num_received, 0);
-    if (num_sent_back < 0) {
-        fatal("serve_request: failure sending back to client","",1);
-    }
+    // two-way dialog until either client or server closes connection
+    relay_data(clientfd, serverfd, buffer);
 
     free(buffer);
-    close(clientfd);
-    close(serverfd);
+    if (fcntl(clientfd, F_GETFD) != -1) {
+        close(clientfd);
+    }
+    if (fcntl(serverfd, F_GETFD) != -1) {
+        close(serverfd);
+    }
     
     return NULL;
 }
 
-int receive_from_server(int sockfd, char *recv_buffer) {
-    /* watch the server socket to see when it has input */
+void relay_data(int clientfd, int serverfd, char *buffer) {
     fd_set rfds;
     struct timeval tv;
-    int retval;
+    int retval, num_received, num_sent, maxfd, rc;
 
     FD_ZERO(&rfds);
-    FD_SET(sockfd, &rfds);
-
-    tv.tv_sec = 5;
+    FD_SET(clientfd, &rfds);
+    FD_SET(serverfd, &rfds);
+    tv.tv_sec = 1;
     tv.tv_usec = 0;
+    maxfd = (serverfd > clientfd ? serverfd : clientfd);
 
-    retval = select(sockfd + 1, &rfds, NULL, NULL, &tv);
-    int num_received;
-    if (retval == -1) {
-        fatal("receive_from_server","select failure", 1);
-    } else if (retval) {
-        num_received = recv(sockfd, recv_buffer, MAX_MSG_LEN, MSG_DONTWAIT);
-    } else {
-        /* no data after timeout seconds */
-        num_received = 0;
+    while ( fcntl(clientfd, F_GETFD) != -1 && fcntl(serverfd, F_GETFD) != -1 ) {
+        retval = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        if (retval == -1) {
+            fatal("relay data","select failure", 1);
+        } else if (retval == 0) {
+            /* no data after timeout seconds */
+            num_received = 0;
+            num_sent = 0;
+        } else {
+            rc = talk(clientfd, serverfd, &rfds, buffer);
+            if (rc < 0)
+                return;
+        }
+    }
+}
+
+int talk(int clientfd, int serverfd, fd_set *rfdsp, char *buffer) {
+    int num_received, num_sent;
+    if (FD_ISSET(clientfd, rfdsp)) {
+        num_received = recv(clientfd, buffer, MAX_MSG_LEN, MSG_DONTWAIT);
+        if (num_received < 0) {
+            fatal("talk","recv failure from client", 1);
+        } else if (num_received == 0) {
+            // nothing to send and clientfd dead so no more communication possible
+            return -1;
+        } else {
+            // avoid error if serverfd is closed, otherwise die on error
+            if (fcntl(serverfd, F_GETFD) != -1) {
+                num_sent = send(serverfd, buffer, num_received, 0);
+                if (num_sent < 0) {
+                    fatal("talk","send failure to server", 1);
+                }
+            }
+        }
     }
 
-    return num_received;
+    if (FD_ISSET(serverfd, rfdsp)) {
+        num_received = recv(serverfd, buffer, MAX_MSG_LEN, MSG_DONTWAIT);
+        if (num_received < 0) {
+            fatal("talk","recv failure from server", 1);
+        } else if (num_received == 0) {
+            // nothing to send and serverfd dead so no more communication possible
+            return -1;
+        } else {
+            // avoid error if clientfd is closed, otherwise die on error
+            if (fcntl(clientfd, F_GETFD) != -1) {
+                num_sent = send(clientfd, buffer, num_received, 0);
+                if (num_sent < 0) {
+                    fatal("talk","send failure to client", 1);
+                }
+            }
+        }
+    }
+
+    return 0;
 }
+
 
 /*
  * read the http request into rq not to exceed rqlen
@@ -342,10 +389,9 @@ char *extract_host(char *request_uri) {
 
     // now pointing at the beginning of the host. remove the path and port (if present)
     char *host = newstr(token, strlen(token));
-    token = strtok(NULL, search);
-    if (token != NULL) {
-        free(host);
-        host = newstr(token, strlen(token));
+    char *idx;
+    if ( (idx = strstr(host, ":")) != NULL || (idx = strstr(host, "/"))) {
+        *idx = '\0';
     }
     return host;
 }
@@ -354,15 +400,19 @@ char *extract_port(char *request_uri) {
     // copy to avoid destroying the input string
     char *copy = newstr(request_uri, strlen(request_uri));
 	char *token;
-    char *search = ":/";
-    // if there is a port it will come after the second colon (the first is in http://)
-    // it will have a / following but that will be removed by strtok
+    char *search = ":";
+    // if there is a port it will come after the second colon (the first is in http:)
+    // it will have a / following
     token = strtok(copy, search);
     token = strtok(NULL, search);
     token = strtok(NULL, search);
     char *port;
     if (token != NULL) {
         port = newstr(token, strlen(token));
+        char *idx;
+        if ((idx = strstr(port, "/")) != NULL ) {
+            *idx = '\0';
+        }
     } else {
         port = newstr("80", 2);
     }

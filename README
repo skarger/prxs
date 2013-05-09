@@ -1,4 +1,6 @@
 Build: make
 Run: ./prxs
-Notes: works for extremely basic requests. Usually crashes when pages send off additional requests (for CSS etc.).
-
+Notes:
+Only works for basic requests.
+Uses multiple threads for different requests.
+However it is very slow because it blocks on connections that stay open.

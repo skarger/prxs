@@ -1,6 +1,6 @@
 # makefile for proxy server
 
-CC = gcc -Wall -g -pthread
+CC = gcc -Wall -pthread
 
 prxs: prxs.o prxs.h socklib.o socklib.h flexstr.o flexstr.h util.o util.h
 	$(CC) -o prxs prxs.o socklib.o util.o flexstr.o

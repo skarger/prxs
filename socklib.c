@@ -78,11 +78,10 @@ int connect_to_server( char *hostname, char *portnum )
     hints.ai_canonname = NULL;
     hints.ai_addr = NULL;
     hints.ai_next = NULL;
-
     rc = getaddrinfo(hostname, portnum, &hints, &result);
     if (rc != 0) {
         printf("getaddrinfo: %s\n", gai_strerror(rc));
-        fatal("connect_to_server", "", 1);
+        return -1;
     }
 
     for (rp = result; rp != NULL; rp = rp->ai_next) {
